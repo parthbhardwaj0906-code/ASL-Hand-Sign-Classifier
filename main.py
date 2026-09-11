@@ -6,6 +6,7 @@ from collections import deque
 import av
 import cv2
 import numpy as np
+import requests
 import streamlit as st
 from streamlit_webrtc import (
     RTCConfiguration,
@@ -25,7 +26,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
 
 # -----------------------------------------------------------------------------
-# WebRTC & Media Stream Configuration with STUN/TURN Relays
+# WebRTC & Media Stream Configuration (Metered TURN Integration)
 # -----------------------------------------------------------------------------
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
@@ -36,29 +37,47 @@ MEDIA_STREAM_CONSTRAINTS = {
     "audio": False,
 }
 
-RTC_CONFIG = RTCConfiguration(
-    {
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302", "stun:stun3.l.google.com:19302"]},
-            {
-                "urls": "turn:openrelay.metered.ca:80",
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
-            },
-            {
-                "urls": "turn:openrelay.metered.ca:443",
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
-            },
-            {
-                "urls": "turn:openrelay.metered.ca:443?transport=tcp",
-                "username": "openrelayproject",
-                "credential": "openrelayproject",
-            },
-        ]
-    }
-)
+METERED_API_KEY = "ad5309263f48ad526cb68cac07785003e110"
+METERED_USERNAME = "f7973cbc48d0dfdb72db313f"
+METERED_CREDENTIAL = "GYCeNokosWrvSpfL"
+
+@st.cache_data(ttl=3600)
+def get_rtc_configuration():
+    """Fetches dynamic ICE servers from Metered API, falling back to static TURN configuration."""
+    try:
+        url = f"https://api.metered.ca/api/v1/turn/credentials?apiKey={METERED_API_KEY}"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            ice_servers = response.json()
+            return RTCConfiguration({"iceServers": ice_servers})
+    except Exception:
+        pass
+
+    # Static Metered TURN relay fallback
+    return RTCConfiguration(
+        {
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+                {
+                    "urls": "turn:global.relay.metered.ca:80",
+                    "username": METERED_USERNAME,
+                    "credential": METERED_CREDENTIAL,
+                },
+                {
+                    "urls": "turn:global.relay.metered.ca:443",
+                    "username": METERED_USERNAME,
+                    "credential": METERED_CREDENTIAL,
+                },
+                {
+                    "urls": "turn:global.relay.metered.ca:443?transport=tcp",
+                    "username": METERED_USERNAME,
+                    "credential": METERED_CREDENTIAL,
+                },
+            ]
+        }
+    )
+
+RTC_CONFIG = get_rtc_configuration()
 
 # -----------------------------------------------------------------------------
 # Sign Language Configuration & Constants
