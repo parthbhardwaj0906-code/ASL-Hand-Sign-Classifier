@@ -1,4 +1,2 @@
 libgl1
-libegl1
 libglib2.0-0
-libgomp1
