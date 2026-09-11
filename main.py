@@ -2,7 +2,10 @@ import os
 import sys
 import time
 from collections import deque
-import cv2
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 import numpy as np
 
 # MediaPipe Python Tasks Vision (used for native desktop mode)
@@ -57,6 +60,8 @@ HAND_CONNECTIONS = [
 class AsyncHandLandmarker:
     def __init__(self, model_path="hand_landmarker.task"):
         self.latest_landmarks = None
+        if vision is None:
+            raise RuntimeError("MediaPipe is required for desktop mode. Run: pip install mediapipe")
         if not os.path.exists(model_path):
             script_dir = os.path.dirname(os.path.abspath(__file__))
             alt_path = os.path.join(script_dir, "hand_landmarker.task")
@@ -305,6 +310,9 @@ class PresentationSignTrainer:
         cv2.putText(frame, status, (w - 280, h - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0) if hand_detected else (0, 0, 255), 1)
 
     def run(self):
+        if cv2 is None:
+            print("[Notice] OpenCV is required for desktop mode. Run: pip install opencv-python")
+            return
         cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
