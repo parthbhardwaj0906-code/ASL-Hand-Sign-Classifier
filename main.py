@@ -1,5 +1,4 @@
 import os
-import time
 from collections import deque
 
 import av
@@ -19,16 +18,34 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 # -----------------------------------------------------------------------------
-# Absolute Path & Environment Setup
+# Absolute Path Resolution & Global Model Preloading
 # -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
+
+@st.cache_resource
+def load_hand_landmarker():
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"Missing MediaPipe task model at: {MODEL_PATH}")
+    base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+    options = vision.HandLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.IMAGE,
+        num_hands=1,
+        min_hand_detection_confidence=0.3,
+        min_hand_presence_confidence=0.3,
+        min_tracking_confidence=0.3,
+    )
+    return vision.HandLandmarker.create_from_options(options)
+
+# Load global detector once to prevent execution freezes inside recv()
+GLOBAL_DETECTOR = load_hand_landmarker()
 
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
         "width": {"ideal": 640, "max": 640},
         "height": {"ideal": 480, "max": 480},
-        "frameRate": {"ideal": 30, "min": 15},
+        "frameRate": {"ideal": 24, "max": 30},
     },
     "audio": False,
 }
@@ -41,7 +58,7 @@ METERED_CREDENTIAL = "GYCeNokosWrvSpfL"
 def get_rtc_configuration():
     try:
         url = f"https://api.metered.ca/api/v1/turn/credentials?apiKey={METERED_API_KEY}"
-        response = requests.get(url, timeout=4)
+        response = requests.get(url, timeout=3)
         if response.status_code == 200:
             return RTCConfiguration({"iceServers": response.json()})
     except Exception:
@@ -58,11 +75,6 @@ def get_rtc_configuration():
                 },
                 {
                     "urls": "turn:global.relay.metered.ca:443",
-                    "username": METERED_USERNAME,
-                    "credential": METERED_CREDENTIAL,
-                },
-                {
-                    "urls": "turn:global.relay.metered.ca:443?transport=tcp",
                     "username": METERED_USERNAME,
                     "credential": METERED_CREDENTIAL,
                 },
@@ -103,24 +115,9 @@ HAND_CONNECTIONS = [
 class SignTrainerProcessor(VideoProcessorBase):
     def __init__(self):
         super().__init__()
-        self.detector = None
         self.target_idx = 0
-        self.score_buffer = deque(maxlen=5)
-
-    def _init_detector(self):
-        if self.detector is None:
-            if not os.path.exists(MODEL_PATH):
-                raise FileNotFoundError(f"Missing MediaPipe task model at: {MODEL_PATH}")
-            base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-            options = vision.HandLandmarkerOptions(
-                base_options=base_options,
-                running_mode=vision.RunningMode.IMAGE,
-                num_hands=1,
-                min_hand_detection_confidence=0.3,
-                min_hand_presence_confidence=0.3,
-                min_tracking_confidence=0.3,
-            )
-            self.detector = vision.HandLandmarker.create_from_options(options)
+        self.score_buffer = deque(maxlen=4)
+        self.frame_counter = 0
 
     def set_target_idx(self, idx: int):
         self.target_idx = idx
@@ -130,14 +127,11 @@ class SignTrainerProcessor(VideoProcessorBase):
         h, w, _ = frame.shape
         points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
 
-        # Draw connecting skeleton lines
         for p1, p2 in HAND_CONNECTIONS:
             cv2.line(frame, points[p1], points[p2], (255, 255, 255), 2)
 
-        # Draw red/green landmark dots
         for pt in points:
-            cv2.circle(frame, pt, 6, (0, 255, 0), -1)
-            cv2.circle(frame, pt, 2, (0, 0, 255), -1)
+            cv2.circle(frame, pt, 5, (0, 255, 0), -1)
 
     def calculate_finger_extensions(self, landmarks):
         wrist = np.array([landmarks[0].x, landmarks[0].y])
@@ -193,44 +187,28 @@ class SignTrainerProcessor(VideoProcessorBase):
             d_index = np.linalg.norm(index_tip - wrist) / palm_size
             if all(1.0 < d < 2.1 for d in [d_index]):
                 score = 0.94
-            else:
-                score = 0.40
         elif target == "D":
             if ext[1] > 0.60 and ext[2] < 0.45 and ext[3] < 0.45 and ext[4] < 0.45:
                 score = 0.95
-            elif ext[1] > 0.60:
-                score = 0.40
         elif target == "I":
             if ext[4] > 0.55 and all(e < 0.45 for e in ext[1:4]):
                 score = 0.95
-            elif ext[4] > 0.55:
-                score = 0.40
         elif target == "L":
             if ext[1] > 0.55 and all(e < 0.40 for e in ext[2:]) and norm_thumb_to_mcp > 0.85:
                 score = 0.94
-            elif ext[1] > 0.55:
-                score = 0.40
         elif target == "O":
             tips = [index_tip, middle_tip, ring_tip, pinky_tip]
             if np.mean([np.linalg.norm(thumb_tip - t) / palm_size for t in tips]) < 0.45:
                 score = 0.93
-            else:
-                score = 0.35
         elif target == "U":
             if ext[1] > 0.60 and ext[2] > 0.60 and ext[3] < 0.40 and ext[4] < 0.40:
                 score = 0.95
-            elif ext[1] > 0.60 and ext[2] > 0.60:
-                score = 0.40
         elif target == "V":
             if ext[1] > 0.60 and ext[2] > 0.60 and ext[3] < 0.40 and ext[4] < 0.40:
                 score = 0.93
-            elif ext[1] > 0.60 and ext[2] > 0.60:
-                score = 0.40
         elif target == "W":
             if ext[1] > 0.55 and ext[2] > 0.55 and ext[3] > 0.55 and ext[4] < 0.40:
                 score = 0.93
-            elif ext[1] > 0.55 and ext[2] > 0.55 and ext[3] > 0.55:
-                score = 0.40
 
         return float(np.clip(score, 0.15, 0.98))
 
@@ -250,26 +228,26 @@ class SignTrainerProcessor(VideoProcessorBase):
             cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.20), h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        self._init_detector()
-
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
 
-        # Convert to MediaPipe SRGB format
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-
-        detection_result = self.detector.detect(mp_image)
-
+        # Process MediaPipe detection on every 2nd frame to ensure continuous stream stability
+        self.frame_counter += 1
         score = 0.0
-        if detection_result.hand_landmarks:
-            landmarks = detection_result.hand_landmarks[0]
-            self.draw_skeleton(img, landmarks)
-            score = self.evaluate_gesture(landmarks)
 
-        self.score_buffer.append(score)
+        if self.frame_counter % 2 == 0:
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            detection_result = GLOBAL_DETECTOR.detect(mp_image)
+
+            if detection_result.hand_landmarks:
+                landmarks = detection_result.hand_landmarks[0]
+                self.draw_skeleton(img, landmarks)
+                score = self.evaluate_gesture(landmarks)
+
+            self.score_buffer.append(score)
+
         smoothed_score = float(np.mean(self.score_buffer)) if self.score_buffer else 0.0
-
         self.draw_hud(img, smoothed_score)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -308,7 +286,7 @@ with col1:
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=SignTrainerProcessor,
         media_stream_constraints=MEDIA_STREAM_CONSTRAINTS,
-        async_processing=True,
+        async_processing=False,  # Set to False to eliminate thread lock freezes
     )
 
     if webrtc_ctx.video_processor:
