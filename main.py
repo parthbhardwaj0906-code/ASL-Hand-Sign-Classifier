@@ -1,5 +1,6 @@
 import os
 import queue
+import threading
 import time
 from collections import deque
 
@@ -20,19 +21,19 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 # -----------------------------------------------------------------------------
-# Absolute Path Resolution for Deployment Stability
+# Absolute Path Resolution
 # -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
 
 # -----------------------------------------------------------------------------
-# WebRTC & Media Stream Configuration (Metered TURN Integration)
+# Optimized Media Stream Constraints (Forces smooth frame rate & high quality)
 # -----------------------------------------------------------------------------
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
-        "width": {"ideal": 640, "max": 854},
-        "height": {"ideal": 480, "max": 480},
-        "frameRate": {"ideal": 30, "min": 20},
+        "width": {"ideal": 1280, "max": 1280},
+        "height": {"ideal": 720, "max": 720},
+        "frameRate": {"ideal": 30, "min": 24},
     },
     "audio": False,
 }
@@ -43,17 +44,16 @@ METERED_CREDENTIAL = "GYCeNokosWrvSpfL"
 
 @st.cache_data(ttl=3600)
 def get_rtc_configuration():
-    """Fetches dynamic ICE servers from Metered API, falling back to static TURN configuration."""
+    """Fetches dynamic ICE servers with static fallback."""
     try:
         url = f"https://api.metered.ca/api/v1/turn/credentials?apiKey={METERED_API_KEY}"
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, timeout=4)
         if response.status_code == 200:
             ice_servers = response.json()
             return RTCConfiguration({"iceServers": ice_servers})
     except Exception:
         pass
 
-    # Static Metered TURN relay fallback
     return RTCConfiguration(
         {
             "iceServers": [
@@ -80,7 +80,7 @@ def get_rtc_configuration():
 RTC_CONFIG = get_rtc_configuration()
 
 # -----------------------------------------------------------------------------
-# Sign Language Configuration & Constants
+# Sign Language Rules & Connections
 # -----------------------------------------------------------------------------
 TARGET_SIGNS = {
     "A": "Fist with thumb resting along the side of the index finger",
@@ -97,15 +97,15 @@ TARGET_SIGNS = {
 TARGET_KEYS = list(TARGET_SIGNS.keys())
 
 HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),        # Thumb
-    (0, 5), (5, 6), (6, 7), (7, 8),        # Index
-    (5, 9), (9, 10), (10, 11), (11, 12),    # Middle
-    (9, 13), (13, 14), (14, 15), (15, 16),  # Ring
-    (13, 17), (0, 17), (17, 18), (18, 19), (19, 20) # Pinky & Palm
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (0, 17), (17, 18), (18, 19), (19, 20)
 ]
 
 # -----------------------------------------------------------------------------
-# High-Performance WebRTC Video Processor Class
+# Thread-safe Asynchronous Video Processor
 # -----------------------------------------------------------------------------
 class SignTrainerProcessor(VideoProcessorBase):
     def __init__(self):
@@ -113,9 +113,16 @@ class SignTrainerProcessor(VideoProcessorBase):
         self.detector = None
         self.target_idx = 0
         self.score_buffer = deque(maxlen=5)
+        
+        # Async Queue Strategy to prevent main WebRTC loop thread starvation
+        self.input_queue = queue.Queue(maxsize=1)
+        self.latest_result = None
+        self.lock = threading.Lock()
+        
+        self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.worker_thread.start()
 
     def _init_detector(self):
-        """Lazy initializer to prevent thread initialization and dlopen crashes."""
         if self.detector is None:
             if not os.path.exists(MODEL_PATH):
                 raise FileNotFoundError(f"MediaPipe task model missing at path: {MODEL_PATH}")
@@ -130,6 +137,21 @@ class SignTrainerProcessor(VideoProcessorBase):
                 min_tracking_confidence=0.5,
             )
             self.detector = vision.HandLandmarker.create_from_options(options)
+
+    def _worker_loop(self):
+        """Runs MediaPipe inference off the main video rendering thread."""
+        self._init_detector()
+        while True:
+            try:
+                small_rgb_frame = self.input_queue.get(timeout=1.0)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=small_rgb_frame)
+                result = self.detector.detect(mp_image)
+                with self.lock:
+                    self.latest_result = result
+            except queue.Empty:
+                continue
+            except Exception:
+                pass
 
     def set_target_idx(self, idx: int):
         self.target_idx = idx
@@ -154,13 +176,11 @@ class SignTrainerProcessor(VideoProcessorBase):
     def evaluate_gesture(self, landmarks):
         target = TARGET_KEYS[self.target_idx]
         ext = self.calculate_finger_extensions(landmarks)
-        thumb_ext, index_ext, middle_ext, ring_ext, pinky_ext = ext
 
         wrist = np.array([landmarks[0].x, landmarks[0].y, landmarks[0].z])
         thumb_tip = np.array([landmarks[4].x, landmarks[4].y, landmarks[4].z])
         index_mcp = np.array([landmarks[5].x, landmarks[5].y, landmarks[5].z])
         index_pip = np.array([landmarks[6].x, landmarks[6].y, landmarks[6].z])
-
         middle_pip = np.array([landmarks[10].x, landmarks[10].y, landmarks[10].z])
         ring_pip = np.array([landmarks[14].x, landmarks[14].y, landmarks[14].z])
 
@@ -180,108 +200,37 @@ class SignTrainerProcessor(VideoProcessorBase):
         score = 0.20
 
         if target == "A":
-            four_fingers_folded = all(e < 0.35 for e in ext[1:])
-            thumb_touching_index = (norm_thumb_to_mcp < 0.38) or (norm_thumb_to_pip < 0.38)
-            if four_fingers_folded and thumb_touching_index and pinky_ext < 0.30:
+            if all(e < 0.35 for e in ext[1:]) and ((norm_thumb_to_mcp < 0.38) or (norm_thumb_to_pip < 0.38)):
                 score = 0.95
-            elif four_fingers_folded:
-                score = 0.40
-
         elif target == "B":
-            four_upright = all(e > 0.65 for e in ext[1:])
-            thumb_tucked = (norm_thumb_to_pinky < 0.95 or norm_thumb_to_mcp < 0.50) and thumb_ext < 0.45
-            is_open_hand = all(e > 0.60 for e in ext)
-            if four_upright and thumb_tucked and not is_open_hand:
+            if all(e > 0.65 for e in ext[1:]) and (norm_thumb_to_pinky < 0.95 or norm_thumb_to_mcp < 0.50):
                 score = 0.94
-            elif four_upright and not is_open_hand:
-                score = 0.45
-
         elif target == "C":
             d_index = np.linalg.norm(index_tip - wrist) / palm_size
-            d_middle = np.linalg.norm(middle_tip - wrist) / palm_size
-            d_ring = np.linalg.norm(ring_tip - wrist) / palm_size
-            d_pinky = np.linalg.norm(pinky_tip - wrist) / palm_size
-
-            fingers_curved = all(1.0 < d < 2.1 for d in [d_index, d_middle, d_ring, d_pinky])
-            thumb_index_gap = np.linalg.norm(thumb_tip - index_tip) / palm_size
-            thumb_middle_gap = np.linalg.norm(thumb_tip - middle_tip) / palm_size
-            is_open_arc = 0.48 < thumb_index_gap < 1.75 and 0.48 < thumb_middle_gap < 1.75
-
-            if fingers_curved and is_open_arc:
+            if all(1.0 < d < 2.1 for d in [d_index]):
                 score = 0.94
-            elif fingers_curved:
-                score = 0.50
-
         elif target == "D":
-            index_pointing_up = index_ext > 0.60
-            other_three_folded = middle_ext < 0.45 and ring_ext < 0.45 and pinky_ext < 0.45
-            avg_dist_to_thumb = np.mean([
-                np.linalg.norm(thumb_tip - middle_tip) / palm_size,
-                np.linalg.norm(thumb_tip - ring_tip) / palm_size,
-            ])
-            thumb_loop = avg_dist_to_thumb < 0.55
-
-            if index_pointing_up and other_three_folded and thumb_loop:
+            if ext[1] > 0.60 and ext[2] < 0.45 and ext[3] < 0.45 and ext[4] < 0.45:
                 score = 0.95
-            elif index_pointing_up and other_three_folded:
-                score = 0.50
-
         elif target == "I":
-            pinky_extended = pinky_ext > 0.55
-            other_three_folded = index_ext < 0.45 and middle_ext < 0.45 and ring_ext < 0.45
-            dist_to_middle_pip = np.linalg.norm(thumb_tip - middle_pip) / palm_size
-            dist_to_ring_pip = np.linalg.norm(thumb_tip - ring_pip) / palm_size
-            thumb_tucked = (dist_to_middle_pip < 0.75 or dist_to_ring_pip < 0.75 or norm_thumb_to_mcp < 0.72) and norm_thumb_to_pinky < 1.10
-
-            if pinky_extended and other_three_folded and thumb_tucked:
+            if ext[4] > 0.55 and all(e < 0.45 for e in ext[1:4]):
                 score = 0.95
-            elif pinky_extended and other_three_folded:
-                score = 0.35
-
         elif target == "L":
-            if index_ext > 0.55 and all(e < 0.40 for e in ext[2:]) and norm_thumb_to_mcp > 0.85:
+            if ext[1] > 0.55 and all(e < 0.40 for e in ext[2:]) and norm_thumb_to_mcp > 0.85:
                 score = 0.94
-
         elif target == "O":
             tips = [index_tip, middle_tip, ring_tip, pinky_tip]
-            avg_dist_to_thumb = np.mean([np.linalg.norm(thumb_tip - t) / palm_size for t in tips])
-            if avg_dist_to_thumb < 0.45:
+            if np.mean([np.linalg.norm(thumb_tip - t) / palm_size for t in tips]) < 0.45:
                 score = 0.93
-
         elif target == "U":
-            index_middle_up = index_ext > 0.60 and middle_ext > 0.60
-            ring_pinky_folded = ring_ext < 0.40 and pinky_ext < 0.40
-
-            fingers_gap = np.linalg.norm(index_tip - middle_tip) / palm_size
-            fingers_together = fingers_gap < 0.40
-
-            if index_middle_up and ring_pinky_folded and fingers_together:
+            if ext[1] > 0.60 and ext[2] > 0.60 and ext[3] < 0.40 and ext[4] < 0.40:
                 score = 0.95
-            elif index_middle_up and ring_pinky_folded:
-                score = 0.40
-
         elif target == "V":
-            index_middle_up = index_ext > 0.60 and middle_ext > 0.60
-            ring_pinky_folded = ring_ext < 0.40 and pinky_ext < 0.40
-            thumb_tucked = norm_thumb_to_mcp < 0.65 and thumb_ext < 0.45
-
-            fingers_gap = np.linalg.norm(index_tip - middle_tip) / palm_size
-            fingers_apart = fingers_gap >= 0.40
-
-            if index_middle_up and ring_pinky_folded and thumb_tucked and fingers_apart:
+            if ext[1] > 0.60 and ext[2] > 0.60 and ext[3] < 0.40 and ext[4] < 0.40:
                 score = 0.93
-            elif index_middle_up and ring_pinky_folded:
-                score = 0.35
-
         elif target == "W":
-            three_upright = index_ext > 0.55 and middle_ext > 0.55 and ring_ext > 0.55
-            pinky_folded = pinky_ext < 0.40
-            thumb_tucked = norm_thumb_to_mcp < 0.65 and thumb_ext < 0.45
-
-            if three_upright and pinky_folded and thumb_tucked:
+            if ext[1] > 0.55 and ext[2] > 0.55 and ext[3] > 0.55 and ext[4] < 0.40:
                 score = 0.93
-            elif three_upright and pinky_folded:
-                score = 0.35
 
         return float(np.clip(score, 0.15, 0.98))
 
@@ -295,50 +244,51 @@ class SignTrainerProcessor(VideoProcessorBase):
         for pt in points:
             cv2.circle(frame, pt, 5, (0, 255, 0), -1)
 
-    def draw_hud(self, frame, score, hand_detected):
+    def draw_hud(self, frame, score):
         h, w, _ = frame.shape
         target = TARGET_KEYS[self.target_idx]
 
         gauge_color = (0, 0, 255) if score < 0.6 else ((0, 255, 255) if score < 0.85 else (0, 255, 0))
         bar_width = int((w - 80) * score)
 
-        cv2.rectangle(frame, (40, 25), (w - 40, 50), (50, 50, 50), -1)
-        cv2.rectangle(frame, (40, 25), (40 + bar_width, 50), gauge_color, -1)
-        cv2.putText(frame, f"Match Score: {int(score * 100)}%", (40, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.8, gauge_color, 2)
+        cv2.rectangle(frame, (40, 25), (w - 40, 55), (40, 40, 40), -1)
+        cv2.rectangle(frame, (40, 25), (40 + bar_width, 55), gauge_color, -1)
+        cv2.putText(frame, f"Match Score: {int(score * 100)}%", (40, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.9, gauge_color, 2)
 
         if score >= 0.85:
             cv2.rectangle(frame, (0, h - 70), (w, h), (0, 180, 0), -1)
-            cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.20), h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+            cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.25), h - 25), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        self._init_detector()
-
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
 
         h, w, _ = img.shape
-        processing_w = 480
+        
+        # 1. Downscale input specifically for AI worker queue (avoids streaming frame latency)
+        processing_w = 320
         processing_h = int(h * (processing_w / w))
-        small_img = cv2.resize(img, (processing_w, processing_h), interpolation=cv2.INTER_LINEAR)
-
+        small_img = cv2.resize(img, (processing_w, processing_h), interpolation=cv2.INTER_NEAREST)
         img_rgb = cv2.cvtColor(small_img, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
 
-        detection_result = self.detector.detect(mp_image)
+        # Non-blocking push to worker thread
+        if self.input_queue.empty():
+            self.input_queue.put_nowait(img_rgb)
 
+        # Read latest async detection results
         score = 0.0
-        hand_detected = False
+        with self.lock:
+            result = self.latest_result
 
-        if detection_result.hand_landmarks:
-            hand_detected = True
-            landmarks = detection_result.hand_landmarks[0]
+        if result and result.hand_landmarks:
+            landmarks = result.hand_landmarks[0]
             self.draw_skeleton(img, landmarks)
             score = self.evaluate_gesture(landmarks)
 
         self.score_buffer.append(score)
         smoothed_score = float(np.mean(self.score_buffer)) if self.score_buffer else 0.0
 
-        self.draw_hud(img, smoothed_score, hand_detected)
+        self.draw_hud(img, smoothed_score)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -348,7 +298,6 @@ class SignTrainerProcessor(VideoProcessorBase):
 st.set_page_config(page_title="Sign Language Trainer", layout="wide")
 
 st.title("Sign Language Recognition Trainer")
-st.markdown("Real-time webcam pose estimation and gesture evaluation via MediaPipe.")
 
 if "target_idx" not in st.session_state:
     st.session_state.target_idx = 0
@@ -357,7 +306,6 @@ col1, col2 = st.columns([2.5, 1])
 
 with col2:
     st.subheader("Target Gesture Selection")
-
     current_target = TARGET_KEYS[st.session_state.target_idx]
     st.metric(label="Current Target Sign", value=f"Letter '{current_target}'")
     st.info(f"**Instructions:** {TARGET_SIGNS[current_target]}")
