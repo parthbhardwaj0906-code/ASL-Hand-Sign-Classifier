@@ -1,3 +1,4 @@
+import os
 import queue
 import time
 from collections import deque
@@ -18,9 +19,14 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 # -----------------------------------------------------------------------------
+# Absolute Path Resolution for Deployment Stability
+# -----------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
+
+# -----------------------------------------------------------------------------
 # WebRTC & Media Stream Configuration
 # -----------------------------------------------------------------------------
-# Request 720p HD video at 30 FPS and disable audio to maximize video bandwidth
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
         "width": {"ideal": 640, "max": 854},
@@ -30,7 +36,6 @@ MEDIA_STREAM_CONSTRAINTS = {
     "audio": False,
 }
 
-# Free public STUN server to ensure WebRTC connects across cloud networks
 RTC_CONFIG = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
@@ -66,19 +71,26 @@ HAND_CONNECTIONS = [
 class SignTrainerProcessor(VideoProcessorBase):
     def __init__(self):
         super().__init__()
-        base_options = python.BaseOptions(model_asset_path="hand_landmarker.task")
-        options = vision.HandLandmarkerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.IMAGE,
-            num_hands=1,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        self.detector = vision.HandLandmarker.create_from_options(options)
-
+        self.detector = None
         self.target_idx = 0
         self.score_buffer = deque(maxlen=5)
+
+    def _init_detector(self):
+        """Lazy initializer to prevent thread initialization and dlopen crashes."""
+        if self.detector is None:
+            if not os.path.exists(MODEL_PATH):
+                raise FileNotFoundError(f"MediaPipe task model missing at path: {MODEL_PATH}")
+            
+            base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                num_hands=1,
+                min_hand_detection_confidence=0.5,
+                min_hand_presence_confidence=0.5,
+                min_tracking_confidence=0.5,
+            )
+            self.detector = vision.HandLandmarker.create_from_options(options)
 
     def set_target_idx(self, idx: int):
         self.target_idx = idx
@@ -108,6 +120,7 @@ class SignTrainerProcessor(VideoProcessorBase):
         wrist = np.array([landmarks[0].x, landmarks[0].y, landmarks[0].z])
         thumb_tip = np.array([landmarks[4].x, landmarks[4].y, landmarks[4].z])
         index_mcp = np.array([landmarks[5].x, landmarks[5].y, landmarks[5].z])
+        index_pip = np.array([landmarks[6].x, landmarks[6].y, landmarks[6].z])
 
         middle_pip = np.array([landmarks[10].x, landmarks[10].y, landmarks[10].z])
         ring_pip = np.array([landmarks[14].x, landmarks[14].y, landmarks[14].z])
@@ -122,20 +135,14 @@ class SignTrainerProcessor(VideoProcessorBase):
             palm_size = 0.20
 
         norm_thumb_to_mcp = np.linalg.norm(thumb_tip - index_mcp) / palm_size
+        norm_thumb_to_pip = np.linalg.norm(thumb_tip - index_pip) / palm_size
         norm_thumb_to_pinky = np.linalg.norm(thumb_tip - pinky_tip) / palm_size
 
         score = 0.20
 
         if target == "A":
             four_fingers_folded = all(e < 0.35 for e in ext[1:])
-            
-            # Distance between thumb tip and index MCP (knuckle) & index PIP (middle joint)
-            index_pip = np.array([landmarks[6].x, landmarks[6].y, landmarks[6].z])
-            norm_thumb_to_pip = np.linalg.norm(thumb_tip - index_pip) / palm_size
-
-            # Enforce tight contact with either the index knuckle or index PIP joint
             thumb_touching_index = (norm_thumb_to_mcp < 0.38) or (norm_thumb_to_pip < 0.38)
-
             if four_fingers_folded and thumb_touching_index and pinky_ext < 0.30:
                 score = 0.95
             elif four_fingers_folded:
@@ -256,30 +263,30 @@ class SignTrainerProcessor(VideoProcessorBase):
         gauge_color = (0, 0, 255) if score < 0.6 else ((0, 255, 255) if score < 0.85 else (0, 255, 0))
         bar_width = int((w - 80) * score)
 
-        # Draw HUD overlays adapted for 720p HD resolution
         cv2.rectangle(frame, (40, 25), (w - 40, 50), (50, 50, 50), -1)
         cv2.rectangle(frame, (40, 25), (40 + bar_width, 50), gauge_color, -1)
         cv2.putText(frame, f"Match Score: {int(score * 100)}%", (40, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.8, gauge_color, 2)
 
         if score >= 0.85:
             cv2.rectangle(frame, (0, h - 70), (w, h), (0, 180, 0), -1)
-            cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.25), h - 25), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.20), h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        # Initialize MediaPipe detector safely on worker thread
+        self._init_detector()
+
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
 
-        # Downscale for faster MediaPipe processing
+        # Downscale for high-speed CPU inference
         h, w, _ = img.shape
         processing_w = 480
         processing_h = int(h * (processing_w / w))
         small_img = cv2.resize(img, (processing_w, processing_h), interpolation=cv2.INTER_LINEAR)
 
-        # Convert small frame to RGB for MediaPipe
         img_rgb = cv2.cvtColor(small_img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
 
-        # Run detection on downscaled frame
         detection_result = self.detector.detect(mp_image)
 
         score = 0.0
@@ -288,7 +295,6 @@ class SignTrainerProcessor(VideoProcessorBase):
         if detection_result.hand_landmarks:
             hand_detected = True
             landmarks = detection_result.hand_landmarks[0]
-            # Draw skeleton and HUD on full-resolution frame
             self.draw_skeleton(img, landmarks)
             score = self.evaluate_gesture(landmarks)
 
