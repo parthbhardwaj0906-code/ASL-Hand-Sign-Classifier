@@ -25,7 +25,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
 
 # -----------------------------------------------------------------------------
-# WebRTC & Media Stream Configuration
+# WebRTC & Media Stream Configuration with STUN/TURN Relays
 # -----------------------------------------------------------------------------
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
@@ -37,7 +37,27 @@ MEDIA_STREAM_CONSTRAINTS = {
 }
 
 RTC_CONFIG = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+    {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302", "stun:stun3.l.google.com:19302"]},
+            {
+                "urls": "turn:openrelay.metered.ca:80",
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443",
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443?transport=tcp",
+                "username": "openrelayproject",
+                "credential": "openrelayproject",
+            },
+        ]
+    }
 )
 
 # -----------------------------------------------------------------------------
@@ -272,13 +292,11 @@ class SignTrainerProcessor(VideoProcessorBase):
             cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.20), h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        # Initialize MediaPipe detector safely on worker thread
         self._init_detector()
 
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
 
-        # Downscale for high-speed CPU inference
         h, w, _ = img.shape
         processing_w = 480
         processing_h = int(h * (processing_w / w))
