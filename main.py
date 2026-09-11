@@ -1,3 +1,4 @@
+import logging
 import os
 from collections import deque
 
@@ -17,50 +18,46 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+logging.basicConfig(level=logging.INFO)
+
 # -----------------------------------------------------------------------------
-# Absolute Path Resolution
+# Absolute Path & Environment Configuration
 # -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
 
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
-        "width": {"ideal": 640, "max": 640},
-        "height": {"ideal": 480, "max": 480},
-        "frameRate": {"ideal": 24, "max": 30},
+        "width": {"ideal": 640},
+        "height": {"ideal": 480},
+        "frameRate": {"ideal": 15, "max": 30},
     },
     "audio": False,
 }
 
-# Your Metered API Key
-METERED_API_KEY = "ad5309263f48ad526cb68cac07785003e110"
-
+# Free Public STUN + Metered Fallback Configuration
 @st.cache_data(ttl=1800)
 def get_rtc_configuration():
-    """Dynamically fetches active TURN/STUN credentials from Metered API."""
+    ice_servers = [
+        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302", "stun:stun3.l.google.com:19302"]},
+    ]
     try:
-        url = f"https://api.metered.ca/api/v1/turn/credentials?apiKey={METERED_API_KEY}"
-        response = requests.get(url, timeout=5)
+        url = "https://api.metered.ca/api/v1/turn/credentials?apiKey=ad5309263f48ad526cb68cac07785003e110"
+        response = requests.get(url, timeout=3)
         if response.status_code == 200:
-            ice_servers = response.json()
-            if ice_servers:
-                return RTCConfiguration({"iceServers": ice_servers})
-    except Exception:
-        pass
+            fetched_servers = response.json()
+            if isinstance(fetched_servers, list):
+                ice_servers.extend(fetched_servers)
+    except Exception as e:
+        logging.warning(f"Metered TURN fetch failed, falling back to STUN: {e}")
 
-    # STUN fallback if API request fails
-    return RTCConfiguration(
-        {
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
-            ]
-        }
-    )
+    return RTCConfiguration({"iceServers": ice_servers})
 
 RTC_CONFIG = get_rtc_configuration()
 
 # -----------------------------------------------------------------------------
-# Sign Configuration & Landmark Links
+# Sign Definitions
 # -----------------------------------------------------------------------------
 TARGET_SIGNS = {
     "A": "Fist with thumb resting along the side of the index finger",
@@ -91,25 +88,30 @@ class SignTrainerProcessor(VideoProcessorBase):
     def __init__(self):
         super().__init__()
         self.detector = None
+        self.detector_failed = False
         self.target_idx = 0
         self.score_buffer = deque(maxlen=4)
         self.frame_counter = 0
 
     def _init_detector(self):
-        """Lazy initialization inside processing context."""
-        if self.detector is None:
-            if not os.path.exists(MODEL_PATH):
-                raise FileNotFoundError(f"Missing MediaPipe task model at: {MODEL_PATH}")
-            base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-            options = vision.HandLandmarkerOptions(
-                base_options=base_options,
-                running_mode=vision.RunningMode.IMAGE,
-                num_hands=1,
-                min_hand_detection_confidence=0.3,
-                min_hand_presence_confidence=0.3,
-                min_tracking_confidence=0.3,
-            )
-            self.detector = vision.HandLandmarker.create_from_options(options)
+        if self.detector is None and not self.detector_failed:
+            try:
+                if not os.path.exists(MODEL_PATH):
+                    raise FileNotFoundError(f"Missing task file at {MODEL_PATH}")
+                
+                base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+                options = vision.HandLandmarkerOptions(
+                    base_options=base_options,
+                    running_mode=vision.RunningMode.IMAGE,
+                    num_hands=1,
+                    min_hand_detection_confidence=0.3,
+                    min_hand_presence_confidence=0.3,
+                    min_tracking_confidence=0.3,
+                )
+                self.detector = vision.HandLandmarker.create_from_options(options)
+            except Exception as e:
+                logging.error(f"Failed to load MediaPipe Landmarker: {e}")
+                self.detector_failed = True
 
     def set_target_idx(self, idx: int):
         self.target_idx = idx
@@ -118,17 +120,14 @@ class SignTrainerProcessor(VideoProcessorBase):
     def draw_skeleton(self, frame, landmarks):
         h, w, _ = frame.shape
         points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
-
         for p1, p2 in HAND_CONNECTIONS:
             cv2.line(frame, points[p1], points[p2], (255, 255, 255), 2)
-
         for pt in points:
             cv2.circle(frame, pt, 5, (0, 255, 0), -1)
 
     def calculate_finger_extensions(self, landmarks):
         wrist = np.array([landmarks[0].x, landmarks[0].y])
         finger_indices = [(4, 2), (8, 6), (12, 10), (16, 14), (20, 18)]
-
         extensions = []
         thumb_tip = np.array([landmarks[4].x, landmarks[4].y])
         thumb_dist = np.linalg.norm(thumb_tip - wrist)
@@ -220,30 +219,37 @@ class SignTrainerProcessor(VideoProcessorBase):
             cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.20), h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        self._init_detector()
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            img = cv2.flip(img, 1)
 
-        img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)
+            self._init_detector()
 
-        self.frame_counter += 1
-        score = 0.0
+            self.frame_counter += 1
+            score = 0.0
 
-        if self.frame_counter % 2 == 0:
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-            detection_result = self.detector.detect(mp_image)
+            if self.detector and not self.detector_failed:
+                if self.frame_counter % 2 == 0:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+                    detection_result = self.detector.detect(mp_image)
 
-            if detection_result.hand_landmarks:
-                landmarks = detection_result.hand_landmarks[0]
-                self.draw_skeleton(img, landmarks)
-                score = self.evaluate_gesture(landmarks)
+                    if detection_result.hand_landmarks:
+                        landmarks = detection_result.hand_landmarks[0]
+                        self.draw_skeleton(img, landmarks)
+                        score = self.evaluate_gesture(landmarks)
 
-            self.score_buffer.append(score)
+                    self.score_buffer.append(score)
 
-        smoothed_score = float(np.mean(self.score_buffer)) if self.score_buffer else 0.0
-        self.draw_hud(img, smoothed_score)
+            smoothed_score = float(np.mean(self.score_buffer)) if self.score_buffer else 0.0
+            self.draw_hud(img, smoothed_score)
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        except Exception as e:
+            # Fallback to plain video frame if inference throws an exception
+            logging.error(f"Error processing frame: {e}")
+            return frame
 
 # -----------------------------------------------------------------------------
 # Streamlit Interface
@@ -274,12 +280,12 @@ with col2:
 
 with col1:
     webrtc_ctx = webrtc_streamer(
-        key="sign-trainer",
+        key="sign-trainer-stream",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=SignTrainerProcessor,
         media_stream_constraints=MEDIA_STREAM_CONSTRAINTS,
-        async_processing=False,
+        async_processing=True,
     )
 
     if webrtc_ctx.video_processor:
