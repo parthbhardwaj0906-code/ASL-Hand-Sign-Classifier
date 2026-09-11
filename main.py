@@ -18,28 +18,10 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 # -----------------------------------------------------------------------------
-# Absolute Path Resolution & Global Model Preloading
+# Absolute Path Resolution
 # -----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
-
-@st.cache_resource
-def load_hand_landmarker():
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(f"Missing MediaPipe task model at: {MODEL_PATH}")
-    base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
-    options = vision.HandLandmarkerOptions(
-        base_options=base_options,
-        running_mode=vision.RunningMode.IMAGE,
-        num_hands=1,
-        min_hand_detection_confidence=0.3,
-        min_hand_presence_confidence=0.3,
-        min_tracking_confidence=0.3,
-    )
-    return vision.HandLandmarker.create_from_options(options)
-
-# Load global detector once to prevent execution freezes inside recv()
-GLOBAL_DETECTOR = load_hand_landmarker()
 
 MEDIA_STREAM_CONSTRAINTS = {
     "video": {
@@ -115,9 +97,26 @@ HAND_CONNECTIONS = [
 class SignTrainerProcessor(VideoProcessorBase):
     def __init__(self):
         super().__init__()
+        self.detector = None
         self.target_idx = 0
         self.score_buffer = deque(maxlen=4)
         self.frame_counter = 0
+
+    def _init_detector(self):
+        """Lazy initialization inside the processor thread."""
+        if self.detector is None:
+            if not os.path.exists(MODEL_PATH):
+                raise FileNotFoundError(f"Missing MediaPipe task model at: {MODEL_PATH}")
+            base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                num_hands=1,
+                min_hand_detection_confidence=0.3,
+                min_hand_presence_confidence=0.3,
+                min_tracking_confidence=0.3,
+            )
+            self.detector = vision.HandLandmarker.create_from_options(options)
 
     def set_target_idx(self, idx: int):
         self.target_idx = idx
@@ -228,17 +227,18 @@ class SignTrainerProcessor(VideoProcessorBase):
             cv2.putText(frame, f"GESTURE MATCHED: '{target}'", (int(w * 0.20), h - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        self._init_detector()
+
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
 
-        # Process MediaPipe detection on every 2nd frame to ensure continuous stream stability
         self.frame_counter += 1
         score = 0.0
 
         if self.frame_counter % 2 == 0:
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-            detection_result = GLOBAL_DETECTOR.detect(mp_image)
+            detection_result = self.detector.detect(mp_image)
 
             if detection_result.hand_landmarks:
                 landmarks = detection_result.hand_landmarks[0]
@@ -286,7 +286,7 @@ with col1:
         rtc_configuration=RTC_CONFIG,
         video_processor_factory=SignTrainerProcessor,
         media_stream_constraints=MEDIA_STREAM_CONSTRAINTS,
-        async_processing=False,  # Set to False to eliminate thread lock freezes
+        async_processing=False,
     )
 
     if webrtc_ctx.video_processor:
