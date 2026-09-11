@@ -1,5 +1,3 @@
-import json
-import numpy as np
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -42,7 +40,6 @@ with col2:
         st.rerun()
 
 with col1:
-    # High-performance HTML5 + MediaPipe JS component
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -51,13 +48,59 @@ with col1:
       <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
       <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
       <style>
-        .container {{ position: relative; width: 640px; height: 480px; background: #000; border-radius: 8px; overflow: hidden; }}
-        video {{ transform: scaleX(-1); width: 640px; height: 480px; object-fit: cover; }}
-        canvas {{ position: absolute; top: 0; left: 0; transform: scaleX(-1); width: 640px; height: 480px; }}
-        #hud {{ position: absolute; top: 15px; left: 20px; right: 20px; z-index: 10; font-family: sans-serif; }}
-        .bar-bg {{ background: rgba(50,50,50,0.8); height: 20px; border-radius: 10px; overflow: hidden; }}
-        .bar-fill {{ background: #ff4b4b; height: 100%; width: 0%; transition: width 0.1s; }}
-        .status {{ color: #fff; margin-top: 8px; font-weight: bold; font-size: 18px; text-shadow: 1px 1px 3px #000; }}
+        .container {{
+          position: relative;
+          width: 640px;
+          height: 480px;
+          background: #000;
+          border-radius: 8px;
+          overflow: hidden;
+        }}
+        video {{
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 640px;
+          height: 480px;
+          object-fit: cover;
+          transform: scaleX(-1);
+        }}
+        canvas {{
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 640px;
+          height: 480px;
+          z-index: 5;
+          transform: scaleX(-1);
+        }}
+        #hud {{
+          position: absolute;
+          top: 15px;
+          left: 20px;
+          right: 20px;
+          z-index: 10;
+          font-family: sans-serif;
+        }}
+        .bar-bg {{
+          background: rgba(50,50,50,0.8);
+          height: 20px;
+          border-radius: 10px;
+          overflow: hidden;
+        }}
+        .bar-fill {{
+          background: #ff4b4b;
+          height: 100%;
+          width: 0%;
+          transition: width 0.1s;
+        }}
+        .status {{
+          color: #fff;
+          margin-top: 8px;
+          font-weight: bold;
+          font-size: 18px;
+          text-shadow: 1px 1px 3px #000;
+        }}
       </style>
     </head>
     <body>
@@ -80,15 +123,6 @@ with col1:
         const currentTarget = "{current_target}";
 
         function evaluateGesture(landmarks) {{
-          const wrist = landmarks[0];
-          const thumbTip = landmarks[4];
-          const indexMcp = landmarks[5];
-          const indexPip = landmarks[6];
-          const indexTip = landmarks[8];
-          const middleTip = landmarks[12];
-          const ringTip = landmarks[16];
-          const pinkyTip = landmarks[20];
-
           function ext(tipIdx, pipIdx) {{
             return (landmarks[pipIdx].y - landmarks[tipIdx].y + 0.02) / 0.12;
           }}
@@ -108,7 +142,7 @@ with col1:
             if (ext4 > 0.55 && ext1 < 0.45 && ext2 < 0.45 && ext3 < 0.45) score = 0.95;
           }} else if (currentTarget === "L") {{
             if (ext1 > 0.55 && ext2 < 0.4 && ext3 < 0.4 && ext4 < 0.4) score = 0.95;
-          }} else if (currentTarget === "O" || currentTarget === "U" || currentTarget === "V" || currentTarget === "W") {{
+          }} else if (["O", "U", "V", "W"].includes(currentTarget)) {{
             if (ext1 > 0.5) score = 0.92;
           }}
 
@@ -121,11 +155,11 @@ with col1:
 
           let score = 0.15;
           if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {{
-            const landmarks = results.multiHandLandmarks[0];
-            drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {{color: '#FFFFFF', lineWidth: 2}});
-            drawLandmarks(canvasCtx, landmarks, {{color: '#00FF00', fillColor: '#FF0000', lineWidth: 1, radius: 4}});
-
-            score = evaluateGesture(landmarks);
+            for (const landmarks of results.multiHandLandmarks) {{
+              drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {{color: '#00FF00', lineWidth: 3}});
+              drawLandmarks(canvasCtx, landmarks, {{color: '#FF0000', fillColor: '#00FF00', lineWidth: 2, radius: 5}});
+            }}
+            score = evaluateGesture(results.multiHandLandmarks[0]);
           }}
 
           const pct = Math.round(score * 100);
@@ -150,7 +184,9 @@ with col1:
         hands.onResults(onResults);
 
         const camera = new Camera(videoElement, {{
-          onFrame: async () => {{ await hands.send({{image: videoElement}}); }},
+          onFrame: async () => {{
+            await hands.send({{image: videoElement}});
+          }},
           width: 640,
           height: 480
         }});
