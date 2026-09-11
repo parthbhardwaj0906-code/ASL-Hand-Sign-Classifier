@@ -32,34 +32,27 @@ MEDIA_STREAM_CONSTRAINTS = {
     "audio": False,
 }
 
+# Your Metered API Key
 METERED_API_KEY = "ad5309263f48ad526cb68cac07785003e110"
-METERED_USERNAME = "f7973cbc48d0dfdb72db313f"
-METERED_CREDENTIAL = "GYCeNokosWrvSpfL"
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def get_rtc_configuration():
+    """Dynamically fetches active TURN/STUN credentials from Metered API."""
     try:
         url = f"https://api.metered.ca/api/v1/turn/credentials?apiKey={METERED_API_KEY}"
-        response = requests.get(url, timeout=3)
+        response = requests.get(url, timeout=5)
         if response.status_code == 200:
-            return RTCConfiguration({"iceServers": response.json()})
+            ice_servers = response.json()
+            if ice_servers:
+                return RTCConfiguration({"iceServers": ice_servers})
     except Exception:
         pass
 
+    # STUN fallback if API request fails
     return RTCConfiguration(
         {
             "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
-                {
-                    "urls": "turn:global.relay.metered.ca:80",
-                    "username": METERED_USERNAME,
-                    "credential": METERED_CREDENTIAL,
-                },
-                {
-                    "urls": "turn:global.relay.metered.ca:443",
-                    "username": METERED_USERNAME,
-                    "credential": METERED_CREDENTIAL,
-                },
+                {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}
             ]
         }
     )
@@ -103,7 +96,7 @@ class SignTrainerProcessor(VideoProcessorBase):
         self.frame_counter = 0
 
     def _init_detector(self):
-        """Lazy initialization inside the processor thread."""
+        """Lazy initialization inside processing context."""
         if self.detector is None:
             if not os.path.exists(MODEL_PATH):
                 raise FileNotFoundError(f"Missing MediaPipe task model at: {MODEL_PATH}")
