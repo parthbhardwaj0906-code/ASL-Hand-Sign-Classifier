@@ -44,9 +44,9 @@ with col1:
     <!DOCTYPE html>
     <html>
     <head>
-      <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-      <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
-      <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+      <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.4/camera_utils.js" crossorigin="anonymous"></script>
+      <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.4/drawing_utils.js" crossorigin="anonymous"></script>
+      <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
       <style>
         .container {{
           position: relative;
@@ -56,7 +56,7 @@ with col1:
           border-radius: 8px;
           overflow: hidden;
         }}
-        video {{
+        #webcam {{
           position: absolute;
           top: 0;
           left: 0;
@@ -65,13 +65,13 @@ with col1:
           object-fit: cover;
           transform: scaleX(-1);
         }}
-        canvas {{
+        #canvas {{
           position: absolute;
           top: 0;
           left: 0;
           width: 640px;
           height: 480px;
-          z-index: 5;
+          z-index: 10;
           transform: scaleX(-1);
         }}
         #hud {{
@@ -79,7 +79,7 @@ with col1:
           top: 15px;
           left: 20px;
           right: 20px;
-          z-index: 10;
+          z-index: 20;
           font-family: sans-serif;
         }}
         .bar-bg {{
@@ -105,11 +105,11 @@ with col1:
     </head>
     <body>
       <div class="container">
-        <video id="webcam" autoplay playsinline></video>
+        <video id="webcam" autoplay playsinline muted></video>
         <canvas id="canvas" width="640" height="480"></canvas>
         <div id="hud">
           <div class="bar-bg"><div id="fill" class="bar-fill"></div></div>
-          <div id="status" class="status">Match Score: 0%</div>
+          <div id="status" class="status">Initializing Camera & Hand Model...</div>
         </div>
       </div>
 
@@ -156,8 +156,8 @@ with col1:
           let score = 0.15;
           if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {{
             for (const landmarks of results.multiHandLandmarks) {{
-              drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {{color: '#00FF00', lineWidth: 3}});
-              drawLandmarks(canvasCtx, landmarks, {{color: '#FF0000', fillColor: '#00FF00', lineWidth: 2, radius: 5}});
+              drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {{color: '#00FF00', lineWidth: 4}});
+              drawLandmarks(canvasCtx, landmarks, {{color: '#FF0000', fillColor: '#00FF00', lineWidth: 2, radius: 6}});
             }}
             score = evaluateGesture(results.multiHandLandmarks[0]);
           }}
@@ -171,7 +171,7 @@ with col1:
         }}
 
         const hands = new Hands({{
-          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${{file}}`
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${{file}}`
         }});
 
         hands.setOptions({{
@@ -191,7 +191,9 @@ with col1:
           height: 480
         }});
 
-        camera.start();
+        camera.start().then(() => {{
+          statusText.innerText = "Match Score: 0%";
+        }});
       </script>
     </body>
     </html>
