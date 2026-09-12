@@ -514,11 +514,11 @@ def build_html_trainer(current_idx: int) -> str:
     // 5-frame moving average score buffer
     const scoreBuffer = [];
 
-    const videoElement = document.getElementById("webcam");
-    const canvasElement = document.getElementById("viewport");
+    const videoElement = parentElement.querySelector("#webcam");
+    const canvasElement = parentElement.querySelector("#viewport");
     const canvasCtx = canvasElement.getContext("2d");
-    const loader = document.getElementById("loader");
-    const loaderText = document.getElementById("loader-text");
+    const loader = parentElement.querySelector("#loader");
+    const loaderText = parentElement.querySelector("#loader-text");
 
     let handLandmarker = null;
     let lastVideoTime = -1;
@@ -881,10 +881,11 @@ def build_html_trainer(current_idx: int) -> str:
     let lastDetectionTime = -1;
 
     function renderFrame() {{
-      // Always schedule next frame first so the video loop NEVER freezes
+      // Always schedule next frame first so the video loop NEVER freezes.
       requestAnimationFrame(renderFrame);
 
-      if (videoElement.readyState < 2) return;
+      try {{
+        if (!videoElement || !canvasElement || !canvasCtx || videoElement.readyState < 2) return;
 
       const w = canvasElement.width;
       const h = canvasElement.height;
@@ -951,7 +952,15 @@ def build_html_trainer(current_idx: int) -> str:
         ? scoreBuffer.reduce((a, b) => a + b, 0) / scoreBuffer.length
         : 0.0;
 
-      drawHUD(smoothedScore, handDetected, w, h);
+        drawHUD(smoothedScore, handDetected, w, h);
+      }} catch (renderErr) {{
+        console.error("ASL render loop error:", renderErr);
+        if (loader && loaderText) {{
+          loader.style.display = "flex";
+          loader.style.opacity = "1";
+          loaderText.innerText = "Camera is running, but the MediaPipe render loop failed: " + renderErr.message;
+        }}
+      }}
     }}
 
     initTrainer();
