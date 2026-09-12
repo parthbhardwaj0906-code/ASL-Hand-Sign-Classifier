@@ -697,7 +697,12 @@ def build_html_trainer(current_idx: int) -> str:
       canvasCtx.lineWidth = 2;
       canvasCtx.strokeStyle = "#FFFFFF";
 
-      for (const [p1, p2] of HAND_CONNECTIONS) {{
+      // Use index-based loops instead of for...of. This is equivalent to the
+      // original 21-point rendering, but avoids iterable/destructuring issues
+      // in some Streamlit component/browser runtimes.
+      for (let i = 0; i < HAND_CONNECTIONS.length; i++) {{
+        const p1 = HAND_CONNECTIONS[i][0];
+        const p2 = HAND_CONNECTIONS[i][1];
         const pt1 = landmarks[p1];
         const pt2 = landmarks[p2];
         canvasCtx.beginPath();
@@ -707,7 +712,8 @@ def build_html_trainer(current_idx: int) -> str:
       }}
 
       canvasCtx.fillStyle = "#00FF00";
-      for (const pt of landmarks) {{
+      for (let i = 0; i < landmarks.length; i++) {{
+        const pt = landmarks[i];
         canvasCtx.beginPath();
         canvasCtx.arc(pt.x * w, pt.y * h, 4, 0, 2 * Math.PI);
         canvasCtx.fill();
