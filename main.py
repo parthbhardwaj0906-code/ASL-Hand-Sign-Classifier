@@ -501,7 +501,7 @@ def build_html_trainer(current_idx: int) -> str:
 
     const TARGET_SIGNS = {repr(TARGET_SIGNS)};
     const TARGET_KEYS = {repr(TARGET_KEYS)};
-    const HAND_CONNECTIONS = {repr(HAND_CONNECTIONS)};
+    const HAND_CONNECTIONS = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
 
     let currentIdx = {current_idx};
     let successTimer = 0;
