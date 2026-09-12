@@ -1038,17 +1038,6 @@ def run_streamlit_app():
                 st.session_state.target_idx = (st.session_state.target_idx + 1) % len(TARGET_KEYS)
                 st.rerun()
 
-        st.divider()
-        st.markdown(
-            """
-            ### 💡 Tips & Hotkeys
-            - **Click `NEXT SIGN >`** on the video HUD or use buttons to cycle letters.
-            - **Keys**: Press `N` for next sign, `P` for previous sign.
-            - Hold hand ~1.5 to 2.5 feet from the camera for best accuracy.
-            - Supported letters: **A, B, C, D, I, L, O, V, W, Y**.
-            """
-        )
-
     with col_cam:
         html_code = build_html_trainer(st.session_state.target_idx)
 
