@@ -58,6 +58,13 @@ HAND_CONNECTIONS = [
 # DESKTOP NATIVE OPENCV ENGINE (Used when running: python main.py)
 # =============================================================================
 class AsyncHandLandmarker:
+    """MediaPipe detector wrapper.
+
+    The recognition/classification code below this class is intentionally untouched.
+    Desktop detection uses synchronous VIDEO mode so every frame is classified from
+    the landmarks returned for that exact frame instead of relying on the asynchronous
+    callback queue.
+    """
     def __init__(self, model_path="hand_landmarker.task"):
         self.latest_landmarks = None
         if vision is None:
@@ -67,29 +74,29 @@ class AsyncHandLandmarker:
             alt_path = os.path.join(script_dir, "hand_landmarker.task")
             if os.path.exists(alt_path):
                 model_path = alt_path
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"MediaPipe model not found: {model_path}")
 
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
-            running_mode=vision.RunningMode.LIVE_STREAM,
+            running_mode=vision.RunningMode.VIDEO,
             num_hands=1,
-            # Lowered thresholds to keep tracking during fast movements/motion blur
             min_hand_detection_confidence=0.35,
             min_hand_presence_confidence=0.35,
             min_tracking_confidence=0.35,
-            result_callback=self._result_callback,
         )
         self.detector = vision.HandLandmarker.create_from_options(options)
 
-    def _result_callback(self, result, output_image, timestamp_ms):
+    def process_frame_async(self, frame_rgb, timestamp_ms):
+        # Keep the existing method name so the rest of the application does not
+        # change. Detection itself is synchronous and returns the current frame.
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        result = self.detector.detect_for_video(mp_image, int(timestamp_ms))
         if result and result.hand_landmarks:
             self.latest_landmarks = result.hand_landmarks[0]
         else:
             self.latest_landmarks = None
-
-    def process_frame_async(self, frame_rgb, timestamp_ms):
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        self.detector.detect_async(mp_image, timestamp_ms)
 
     def get_landmarks(self):
         return self.latest_landmarks
@@ -851,22 +858,41 @@ def build_html_trainer(current_idx: int) -> str:
         }}
 
         loaderText.innerText = "Requesting Webcam access...";
+        if (!window.isSecureContext) {{
+          throw new Error("Camera access requires HTTPS or localhost.");
+        }}
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
+          throw new Error("This browser does not expose webcam access to the app.");
+        }}
+
         const stream = await navigator.mediaDevices.getUserMedia({{
           video: {{
-            width: {{ ideal: 640 }},
-            height: {{ ideal: 480 }},
-            frameRate: {{ ideal: 30 }}
+            facingMode: {{ ideal: "user" }},
+            width: {{ ideal: 640, min: 320 }},
+            height: {{ ideal: 480, min: 240 }},
+            frameRate: {{ ideal: 30, min: 15 }}
           }},
           audio: false
         }});
 
         videoElement.srcObject = stream;
-        await new Promise((resolve) => {{
-          if (videoElement.readyState >= 2) {{
+        await new Promise((resolve, reject) => {{
+          const timeout = setTimeout(() => reject(new Error("Webcam started but no video frames arrived.")), 10000);
+          if (videoElement.readyState >= 2 && videoElement.videoWidth > 0) {{
+            clearTimeout(timeout);
             resolve();
-          }} else {{
-            videoElement.onloadeddata = () => resolve();
+            return;
           }}
+          videoElement.onloadedmetadata = () => {{
+            if (videoElement.videoWidth > 0) {{
+              clearTimeout(timeout);
+              resolve();
+            }}
+          }};
+          videoElement.onerror = () => {{
+            clearTimeout(timeout);
+            reject(new Error("The webcam video stream could not be read."));
+          }};
         }});
         await videoElement.play();
         loader.style.opacity = "0";
@@ -884,7 +910,7 @@ def build_html_trainer(current_idx: int) -> str:
       // Always schedule next frame first so the video loop NEVER freezes
       requestAnimationFrame(renderFrame);
 
-      if (videoElement.readyState < 2) return;
+      if (videoElement.readyState < 2 || videoElement.videoWidth === 0 || videoElement.videoHeight === 0) return;
 
       const w = canvasElement.width;
       const h = canvasElement.height;
