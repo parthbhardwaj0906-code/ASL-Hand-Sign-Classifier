@@ -1026,21 +1026,13 @@ def is_streamlit_running() -> bool:
 
 
 if __name__ == "__main__":
-    if is_streamlit_running():
-        run_streamlit_app()
-    elif "--streamlit" in sys.argv or (len(sys.argv) > 1 and sys.argv[1] == "run"):
-        # Explicit fallback if invoked via streamlit
-        run_streamlit_app()
-    else:
-        # Direct Python CLI launch: Run the native desktop OpenCV HUD
+    if "--desktop" in sys.argv:
         try:
             app = PresentationSignTrainer()
             app.run()
         except Exception as e:
-            # If camera or display is unavailable, provide instructions
             print(f"[Notice] Desktop OpenCV window exited: {e}")
-            print("\nTo run the interactive web application, execute:")
-            print("    streamlit run main.py\n")
-elif is_streamlit_running():
-    # When imported or executed by Streamlit runner
+    else:
+        run_streamlit_app()
+else:
     run_streamlit_app()
