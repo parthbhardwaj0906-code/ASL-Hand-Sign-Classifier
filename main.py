@@ -58,13 +58,6 @@ HAND_CONNECTIONS = [
 # DESKTOP NATIVE OPENCV ENGINE (Used when running: python main.py)
 # =============================================================================
 class AsyncHandLandmarker:
-    """MediaPipe detector wrapper.
-
-    The recognition/classification code below this class is intentionally untouched.
-    Desktop detection uses synchronous VIDEO mode so every frame is classified from
-    the landmarks returned for that exact frame instead of relying on the asynchronous
-    callback queue.
-    """
     def __init__(self, model_path="hand_landmarker.task"):
         self.latest_landmarks = None
         if vision is None:
@@ -74,29 +67,29 @@ class AsyncHandLandmarker:
             alt_path = os.path.join(script_dir, "hand_landmarker.task")
             if os.path.exists(alt_path):
                 model_path = alt_path
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"MediaPipe model not found: {model_path}")
 
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
-            running_mode=vision.RunningMode.VIDEO,
+            running_mode=vision.RunningMode.LIVE_STREAM,
             num_hands=1,
+            # Lowered thresholds to keep tracking during fast movements/motion blur
             min_hand_detection_confidence=0.35,
             min_hand_presence_confidence=0.35,
             min_tracking_confidence=0.35,
+            result_callback=self._result_callback,
         )
         self.detector = vision.HandLandmarker.create_from_options(options)
 
-    def process_frame_async(self, frame_rgb, timestamp_ms):
-        # Keep the existing method name so the rest of the application does not
-        # change. Detection itself is synchronous and returns the current frame.
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        result = self.detector.detect_for_video(mp_image, int(timestamp_ms))
+    def _result_callback(self, result, output_image, timestamp_ms):
         if result and result.hand_landmarks:
             self.latest_landmarks = result.hand_landmarks[0]
         else:
             self.latest_landmarks = None
+
+    def process_frame_async(self, frame_rgb, timestamp_ms):
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+        self.detector.detect_async(mp_image, timestamp_ms)
 
     def get_landmarks(self):
         return self.latest_landmarks
@@ -858,41 +851,22 @@ def build_html_trainer(current_idx: int) -> str:
         }}
 
         loaderText.innerText = "Requesting Webcam access...";
-        if (!window.isSecureContext) {{
-          throw new Error("Camera access requires HTTPS or localhost.");
-        }}
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {{
-          throw new Error("This browser does not expose webcam access to the app.");
-        }}
-
         const stream = await navigator.mediaDevices.getUserMedia({{
           video: {{
-            facingMode: {{ ideal: "user" }},
-            width: {{ ideal: 640, min: 320 }},
-            height: {{ ideal: 480, min: 240 }},
-            frameRate: {{ ideal: 30, min: 15 }}
+            width: {{ ideal: 640 }},
+            height: {{ ideal: 480 }},
+            frameRate: {{ ideal: 30 }}
           }},
           audio: false
         }});
 
         videoElement.srcObject = stream;
-        await new Promise((resolve, reject) => {{
-          const timeout = setTimeout(() => reject(new Error("Webcam started but no video frames arrived.")), 10000);
-          if (videoElement.readyState >= 2 && videoElement.videoWidth > 0) {{
-            clearTimeout(timeout);
+        await new Promise((resolve) => {{
+          if (videoElement.readyState >= 2) {{
             resolve();
-            return;
+          }} else {{
+            videoElement.onloadeddata = () => resolve();
           }}
-          videoElement.onloadedmetadata = () => {{
-            if (videoElement.videoWidth > 0) {{
-              clearTimeout(timeout);
-              resolve();
-            }}
-          }};
-          videoElement.onerror = () => {{
-            clearTimeout(timeout);
-            reject(new Error("The webcam video stream could not be read."));
-          }};
         }});
         await videoElement.play();
         loader.style.opacity = "0";
@@ -910,7 +884,7 @@ def build_html_trainer(current_idx: int) -> str:
       // Always schedule next frame first so the video loop NEVER freezes
       requestAnimationFrame(renderFrame);
 
-      if (videoElement.readyState < 2 || videoElement.videoWidth === 0 || videoElement.videoHeight === 0) return;
+      if (videoElement.readyState < 2) return;
 
       const w = canvasElement.width;
       const h = canvasElement.height;
@@ -1062,7 +1036,59 @@ def run_streamlit_app():
 
     with col_cam:
         html_code = build_html_trainer(st.session_state.target_idx)
-        components.html(html_code, height=510)
+
+        # Streamlit V1 components.html() runs inside a sandboxed iframe.
+        # That iframe is the part that can interfere with browser camera access.
+        # Keep the existing MediaPipe/landmark/recognition code exactly as-is,
+        # but mount its HTML/JS as a Streamlit V2 component instead.
+        if hasattr(st.components, "v2"):
+            import re
+
+            style_match = re.search(r"<style>(.*?)</style>", html_code, re.DOTALL)
+            script_match = re.search(r"<script type=\"module\">(.*?)</script>", html_code, re.DOTALL)
+            body_match = re.search(r"<body>(.*?)</body>", html_code, re.DOTALL)
+
+            if not (style_match and script_match and body_match):
+                st.error("Could not initialize the MediaPipe camera component.")
+            else:
+                component_css = style_match.group(1)
+                component_html = body_match.group(1)
+                component_js_source = script_match.group(1).strip()
+
+                # V2 expects an ES-module default export. The original browser
+                # MediaPipe script is preserved verbatim inside that renderer.
+                # Only the component wrapper is added; gesture recognition is not changed.
+                import_line_match = re.match(
+                    r"\s*(import\s+\{.*?\}\s+from\s+\".*?\";)",
+                    component_js_source,
+                    re.DOTALL,
+                )
+
+                if not import_line_match:
+                    st.error("Could not initialize the MediaPipe module.")
+                else:
+                    import_line = import_line_match.group(1)
+                    component_js_body = component_js_source[import_line_match.end():]
+                    component_js = (
+                        import_line
+                        + "\n\nexport default function(component) {\n"
+                        + "  const { parentElement } = component;\n"
+                        + component_js_body
+                        + "\n}\n"
+                    )
+
+                    asl_component = st.components.v2.component(
+                        "asl_mediapipe_trainer",
+                        html=component_html,
+                        css=component_css,
+                        js=component_js,
+                        isolate_styles=False,
+                    )
+                    asl_component(key="asl-camera")
+        else:
+            # This branch is only for old Streamlit versions. GitHub/Streamlit
+            # deployment should use the V2 path above.
+            components.html(html_code, height=510)
 
 
 # =============================================================================
