@@ -429,7 +429,14 @@ def build_html_trainer(current_idx: int) -> str:
       border: 1px solid rgba(255, 255, 255, 0.1);
     }}
     video#webcam {{
-      display: none;
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 640px;
+      height: 480px;
+      opacity: 0;
+      pointer-events: none;
+      z-index: 1;
     }}
     canvas#viewport {{
       position: absolute;
@@ -854,77 +861,97 @@ def build_html_trainer(current_idx: int) -> str:
         }});
 
         videoElement.srcObject = stream;
-        videoElement.onloadedmetadata = () => {{
-          videoElement.play();
-          loader.style.opacity = "0";
-          setTimeout(() => {{ loader.style.display = "none"; }}, 300);
-          requestAnimationFrame(renderFrame);
-        }};
+        await new Promise((resolve) => {{
+          if (videoElement.readyState >= 2) {{
+            resolve();
+          }} else {{
+            videoElement.onloadeddata = () => resolve();
+          }}
+        }});
+        await videoElement.play();
+        loader.style.opacity = "0";
+        setTimeout(() => {{ loader.style.display = "none"; }}, 300);
+        requestAnimationFrame(renderFrame);
       }} catch (err) {{
         console.error("Initialization error:", err);
         loaderText.innerText = "Webcam or Model initialization error: " + err.message + "\\nPlease allow camera permissions.";
       }}
     }}
 
+    let lastDetectionTime = -1;
+
     function renderFrame() {{
+      // Always schedule next frame first so the video loop NEVER freezes
+      requestAnimationFrame(renderFrame);
+
+      if (videoElement.readyState < 2) return;
+
       const w = canvasElement.width;
       const h = canvasElement.height;
 
-      if (videoElement.readyState >= 2) {{
-        // Draw video mirrored (flip horizontally, identical to cv2.flip(frame, 1))
-        canvasCtx.save();
-        canvasCtx.translate(w, 0);
-        canvasCtx.scale(-1, 1);
-        canvasCtx.drawImage(videoElement, 0, 0, w, h);
-        canvasCtx.restore();
+      // Draw video mirrored (flip horizontally, identical to cv2.flip(frame, 1))
+      canvasCtx.save();
+      canvasCtx.translate(w, 0);
+      canvasCtx.scale(-1, 1);
+      canvasCtx.drawImage(videoElement, 0, 0, w, h);
+      canvasCtx.restore();
 
-        let landmarks = null;
-        if (handLandmarker && videoElement.currentTime !== lastVideoTime) {{
-          lastVideoTime = videoElement.currentTime;
-          const startTimeMs = performance.now();
-          const results = handLandmarker.detectForVideo(canvasElement, startTimeMs);
+      let landmarks = null;
+      if (handLandmarker) {{
+        try {{
+          const nowMs = performance.now();
+          const timestampMs = nowMs > lastDetectionTime ? nowMs : lastDetectionTime + 1;
+          lastDetectionTime = timestampMs;
+
+          // Detect on the raw videoElement (standard MediaPipe Tasks Vision input)
+          const results = handLandmarker.detectForVideo(videoElement, timestampMs);
 
           if (results && results.landmarks && results.landmarks.length > 0) {{
-            landmarks = results.landmarks[0];
+            // Mirror landmarks horizontally to match mirrored video display (identical to cv2.flip(frame, 1))
+            landmarks = results.landmarks[0].map(p => ({{
+              x: 1.0 - p.x,
+              y: p.y,
+              z: p.z || 0
+            }}));
           }}
+        }} catch (detectErr) {{
+          console.warn("Detection glitch on frame:", detectErr);
         }}
-
-        // Decay buffer: Hold landmarks for up to 4 frames if lost briefly due to blur
-        if (landmarks !== null) {{
-          lastValidLandmarks = landmarks;
-          landmarkHoldCounter = 4;
-        }} else if (landmarkHoldCounter > 0) {{
-          landmarks = lastValidLandmarks;
-          landmarkHoldCounter -= 1;
-        }}
-
-        let score = 0.0;
-        let handDetected = false;
-
-        if (landmarks) {{
-          handDetected = true;
-          drawSkeleton(landmarks, w, h);
-          score = evaluateGesture(landmarks);
-        }}
-
-        if (forceSuccess) {{
-          score = 1.0;
-          successTimer = 25;
-          forceSuccess = false;
-        }}
-
-        scoreBuffer.push(score);
-        if (scoreBuffer.length > 5) {{
-          scoreBuffer.shift();
-        }}
-        const smoothedScore = scoreBuffer.length > 0
-          ? scoreBuffer.reduce((a, b) => a + b, 0) / scoreBuffer.length
-          : 0.0;
-
-        drawHUD(smoothedScore, handDetected, w, h);
       }}
 
-      requestAnimationFrame(renderFrame);
+      // Decay buffer: Hold landmarks for up to 4 frames if lost briefly due to blur
+      if (landmarks !== null) {{
+        lastValidLandmarks = landmarks;
+        landmarkHoldCounter = 4;
+      }} else if (landmarkHoldCounter > 0) {{
+        landmarks = lastValidLandmarks;
+        landmarkHoldCounter -= 1;
+      }}
+
+      let score = 0.0;
+      let handDetected = false;
+
+      if (landmarks) {{
+        handDetected = true;
+        drawSkeleton(landmarks, w, h);
+        score = evaluateGesture(landmarks);
+      }}
+
+      if (forceSuccess) {{
+        score = 1.0;
+        successTimer = 25;
+        forceSuccess = false;
+      }}
+
+      scoreBuffer.push(score);
+      if (scoreBuffer.length > 5) {{
+        scoreBuffer.shift();
+      }}
+      const smoothedScore = scoreBuffer.length > 0
+        ? scoreBuffer.reduce((a, b) => a + b, 0) / scoreBuffer.length
+        : 0.0;
+
+      drawHUD(smoothedScore, handDetected, w, h);
     }}
 
     initTrainer();
